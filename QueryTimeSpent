@@ -1,0 +1,38 @@
+-- Query time spend breakdown (queue, compile, execute, commit)
+-- gives a high level overview of where the redshift cluster is spending time.
+-- note this does not give the information for query planner or lock waiting (we can see this via the database performance graph)
+-- Queries are sourced from various members. The query is to help folks troubleshoot the performance issue faster.
+-- Use case 1: Post a patch performance was slow on a redshift cluster. Check if the compile times have gone up.
+
+select *,pct_compile_time+pct_wlm_queue_time+pct_exec_only_time+pct_commit_queue_time+pct_commit_time as total_pcnt from
+	( SELECT IQ.*,
+             ((IQ.total_compile_time*1.0/IQ.wlm_start_commit_time)*100)::decimal(5,2) as pct_compile_time,
+             ((IQ.wlm_queue_time*1.0/IQ.wlm_start_commit_time)*100)::decimal(5,2) as pct_wlm_queue_time,
+             ((IQ.exec_only_time*1.0/IQ.wlm_start_commit_time)*100)::decimal(5,2) as pct_exec_only_time,
+             ((IQ.commit_queue_time*1.0/IQ.wlm_start_commit_time)*100)::decimal(5,2) pct_commit_queue_time,
+             ((IQ.commit_time*1.0/IQ.wlm_start_commit_time)*100)::decimal(5,2) pct_commit_time
+             from (
+                 select
+                   trunc(d.service_class_start_time) as day,
+                   d.service_class,
+                   d.node,
+                   count(distinct d.xid) as count_all_xid,
+                   count(distinct d.xid) - count(distinct c.xid) as count_readonly_xid,
+                   count(distinct c.xid) as count_commit_xid,
+                   SUM(compile_us) as total_compile_time,
+                   SUM(datediff(us, case when d.service_class_start_time >  compile_start then compile_start else d.service_class_start_time end, d.queue_end_time)) as wlm_queue_time,
+                   SUM(datediff(us, d.queue_end_time, d.service_class_end_time) - compile_us) as exec_only_time,
+                   nvl(SUM(datediff(us, case when node > -1 then c.startwork else c.startqueue end, c.startwork)),0) commit_queue_time,
+                   nvl(SUM(datediff(us, c.startwork, c.endtime)),0) commit_time,
+                   SUM(datediff(us, case when d.service_class_start_time >  compile_start then compile_start else d.service_class_start_time end, d.service_class_end_time) + case when c.endtime is null then 0 else (datediff(us, case when node > -1 then c.startwork else c.startqueue end, c.endtime)) end) as wlm_start_commit_time
+                 from
+                 (select node,b.* from (select -1 as node union select node from stv_slices) a ,stl_wlm_query b where queue_end_time > '2005-01-01' and exec_start_time > '2005-01-01') d
+                 left join stl_commit_stats c using (xid,node)
+                 join (select query,min(starttime) as compile_start,sum(datediff(us,starttime,endtime)) as compile_us from svl_compile group by 1) e using (query)
+                 where d.xid > 0
+                 and   d.service_class > 4
+                 and   d.final_state <> 'Evicted'
+                 group by
+                 trunc(d.service_class_start_time), d.service_class,d.node
+                 order by
+                 trunc(d.service_class_start_time), d.service_class,d.node ) IQ) order by 1,2,3;
