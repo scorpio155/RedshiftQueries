@@ -1,0 +1,23 @@
+-- Node Level processing and Bytes percentage to check which node may be processing more slowly than the rest or more data is being processed on certain nodes.
+-- break down the query for a specific time or specific query and its steps if needed.
+-- Use this query to see if there is more bytes processed on one node and is also taking more execution time.
+-- If the bytes processed are more we can see over slowness in the system as we are not taking full advantage of a parallel system.
+-- Do also look at commit level inforamtion per node to see if certain nodes are commiting more.
+-- Check stl_commit_stats for commit info per node.
+
+with query_report_data as (
+select qr.start_time::date as day_d, sl.node, qr.slice,qr.query,qr.segment,
+datediff('ms',min(qr.start_time),max(qr.end_time)) as elapsed_ms, sum(qr.bytes) as bytes 
+from svl_query_report qr join stv_slices as sl on (sl.slice = qr.slice)
+where qr.end_time > qr.start_time
+group by day_d,sl.node, qr.slice,qr.query,qr.segment
+) 
+	select day_d,node,
+	sum(elapsed_ms) as elapsed_ms,
+	sum(bytes) as bytes,
+	round(ratio_to_report(sum(bytes)) over (partition by day_d),4)*100 as pct_bytes_day,
+	round(ratio_to_report(sum(elapsed_ms)) over (partition by day_d),4)*100 as pct_elapsed_day
+	from query_report_data group by day_d,node
+	order by day_d;
+
+
